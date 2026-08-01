@@ -170,7 +170,7 @@ CREATE TABLE audit_log (
   user_name       TEXT NOT NULL,
   user_role       user_role NOT NULL,
   action          TEXT NOT NULL,
-  previous_value  TEXT,
+  previous_value  TEXT,     0543299009
   new_value       TEXT,
   reason          TEXT,
   ip_address      INET,

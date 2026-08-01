@@ -7,6 +7,8 @@ const path = require("path");
 const OUTPUT_DIR = process.env.REPORTS_DIR || "/var/data/reports";
 const PORTAL_BASE = process.env.PORTAL_BASE_URL || "https://portal.aduanamodel.edu.gh";
 
+fs.mkdirSync(OUTPUT_DIR, { recursive: true});
+
 /**
  * Builds an HMAC-signed verification token so a scanned QR code can be
  * checked against the live database without exposing the raw exam/student
