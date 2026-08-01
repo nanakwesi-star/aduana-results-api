@@ -8,6 +8,33 @@ const { sendResultSms, sendResultWhatsapp } = require("../services/mnotify");
 
 router.use(requireAuth, captureRequestContext);
 
+// ---------------------------------------------------------------
+// Create a new exam record (Teacher starts a draft)
+// ---------------------------------------------------------------
+router.post("/", requireRole("teacher"), async (req, res, next) => {
+  const { class: className, subject, term, academicYear } = req.body;
+  if (!className || !subject || !term || !academicYear) {
+    return res.status(400).json({ error: "class, subject, term, and academicYear are all required." });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query(
+      `INSERT INTO exams (class, subject, term, academic_year, teacher_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [className, subject, term, academicYear, req.user.id]
+    );
+    const exam = rows[0];
+    await writeAuditLog(client, {
+      examId: exam.id, user: req.user, action: "Created new exam record.",
+      previousValue: null, newValue: `${className} / ${subject} / ${term} ${academicYear}`,
+      ip: req.auditContext.ip, device: req.auditContext.device,
+    });
+    await client.query("COMMIT");
+    res.status(201).json(exam);
+  } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
+});
+
+
 async function getExamOr404(client, id) {
   const { rows } = await client.query(`SELECT * FROM exams WHERE id = $1`, [id]);
   if (!rows[0]) throw { status: 404, message: "Examination not found." };
