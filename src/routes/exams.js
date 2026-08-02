@@ -34,7 +34,6 @@ router.post("/", requireRole("teacher"), async (req, res, next) => {
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
-
 async function getExamOr404(client, id) {
   const { rows } = await client.query(`SELECT * FROM exams WHERE id = $1`, [id]);
   if (!rows[0]) throw { status: 404, message: "Examination not found." };
@@ -385,6 +384,40 @@ router.post("/corrections/:crId/headmaster-decision", requireRole("headmaster"),
 // ---------------------------------------------------------------
 // Read endpoints
 // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// Read endpoints
+// ---------------------------------------------------------------
+// List exams. Teachers see only their own; Administrator/Headmaster/
+// Super Admin see everything, since they need visibility across the school.
+router.get("/", async (req, res, next) => {
+  try {
+    const isStaff = ["administrator", "headmaster", "super_administrator"].includes(req.user.role);
+    const { rows } = isStaff
+      ? await pool.query(`SELECT e.*, u.name AS teacher_name FROM exams e JOIN users u ON u.id = e.teacher_id ORDER BY e.created_at DESC`)
+      : await pool.query(`SELECT e.*, u.name AS teacher_name FROM exams e JOIN users u ON u.id = e.teacher_id WHERE e.teacher_id = $1 ORDER BY e.created_at DESC`, [req.user.id]);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// Single exam with its current marks attached, for the detail view.
+router.get("/:id", async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT e.*, u.name AS teacher_name FROM exams e JOIN users u ON u.id = e.teacher_id WHERE e.id = $1`,
+      [req.params.id]
+    );
+    const exam = rows[0];
+    if (!exam) return res.status(404).json({ error: "Examination not found." });
+
+    const { rows: marks } = await pool.query(
+      `SELECT em.*, s.full_name FROM exam_marks em JOIN students s ON s.id = em.student_id
+       WHERE em.exam_id = $1 AND em.version = $2 ORDER BY s.full_name`,
+      [exam.id, exam.current_version]
+    );
+    res.json({ ...exam, marks });
+  } catch (err) { next(err); }
+});
+
 router.get("/:id/audit-log", requireRole("administrator", "headmaster", "super_administrator"), async (req, res, next) => {
   try {
     const { rows } = await pool.query(`SELECT * FROM audit_log WHERE exam_id = $1 ORDER BY id ASC`, [req.params.id]);

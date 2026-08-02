@@ -8,6 +8,7 @@
     "migrate": "psql \"$DATABASE_URL\" -f schema.sql"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.19.2",
     "pg": "^8.12.0",
     "jsonwebtoken": "^9.0.2",
