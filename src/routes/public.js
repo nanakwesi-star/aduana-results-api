@@ -11,13 +11,36 @@ const { pool } = require("../db");
  * admission number itself is acting as the access key — worth upgrading
  * to a PIN or date-of-birth check before this handles real student data.
  */
+// Strips everything but digits, then compares the last 9 digits — this
+// tolerates the different ways the same Ghanaian number gets typed
+// (0551234567, +233551234567, with spaces/dashes, etc.) without needing
+// the parent to match formatting exactly.
+function normalizePhone(p) {
+  const digits = String(p || "").replace(/\D/g, "");
+  return digits.slice(-9);
+}
+
+/**
+ * Public lookup by admission number AND parent phone — both must match.
+ * Deliberately returns the same generic error whether the admission
+ * number doesn't exist or the phone doesn't match it, so a stranger
+ * probing the endpoint can't tell which field was wrong and narrow
+ * down a guess field-by-field. Only exams that are 'published' or
+ * 'locked' are ever returned — never a draft or in-progress mark.
+ */
 router.get("/students/:admissionNo/results", async (req, res, next) => {
+  const GENERIC_ERROR = "No results found for that admission number and phone number. Please check both and try again.";
   try {
+    const { phone } = req.query;
+    if (!phone) return res.status(400).json({ error: "Parent phone number is required." });
+
     const { rows: studentRows } = await pool.query(
       `SELECT * FROM students WHERE admission_no = $1`, [req.params.admissionNo]
     );
     const student = studentRows[0];
-    if (!student) return res.status(404).json({ error: "No student found with that admission number." });
+    if (!student || normalizePhone(student.parent_phone) !== normalizePhone(phone)) {
+      return res.status(404).json({ error: GENERIC_ERROR });
+    }
 
     const { rows: results } = await pool.query(
       `SELECT e.id AS exam_id, e.subject, e.term, e.academic_year, e.status, e.published_at,
