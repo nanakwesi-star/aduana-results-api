@@ -432,4 +432,28 @@ router.get("/:id/versions", requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Lists the generated report cards for the exam's current version, each
+// with a public verify link — this is what the dashboard shows staff so
+// they can hand out / re-share the same QR-verified PDFs parents get.
+router.get("/:id/report-cards", requireAuth, async (req, res, next) => {
+  try {
+    const { rows: examRows } = await pool.query(`SELECT current_version FROM exams WHERE id = $1`, [req.params.id]);
+    if (!examRows[0]) return res.status(404).json({ error: "Examination not found." });
+
+    const { rows } = await pool.query(
+      `SELECT rc.qr_token, rc.generated_at, s.full_name
+       FROM report_cards rc JOIN students s ON s.id = rc.student_id
+       WHERE rc.exam_id = $1 AND rc.version = $2 ORDER BY s.full_name`,
+      [req.params.id, examRows[0].current_version]
+    );
+    const base = process.env.PORTAL_BASE_URL || "";
+    res.json(rows.map((r) => ({
+      studentName: r.full_name,
+      generatedAt: r.generated_at,
+      verifyUrl: `${base}/verify/${r.qr_token}`,
+      pdfUrl: `${base}/verify/${r.qr_token}/pdf`,
+    })));
+  } catch (err) { next(err); }
+});
+
 module.exports = { router, dispatchQueuedNotifications };
