@@ -9,6 +9,7 @@ const { router: superAdminRoutes } = require("./routes/superAdmin");
 const { router: verifyRoutes } = require("./routes/verify");
 const { router: studentRoutes } = require("./routes/students");
 const { router: publicRoutes } = require("./routes/public");
+const { router: authRoutes } = require("./routes/auth");
 const { startLockScheduler } = require("./services/lockScheduler");
 
 const app = express();
@@ -24,6 +25,7 @@ app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOStri
 app.use("/api/exams", examRoutes);
 app.use("/api/students", studentRoutes);
 app.use("/api/public", publicRoutes); // no auth — Parent Portal reads only
+app.use("/api/auth", authRoutes); // no auth — this IS the auth route
 app.use("/api/super-admin", superAdminRoutes);
 app.use("/verify", verifyRoutes); // public, no auth — QR code target
 
