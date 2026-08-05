@@ -432,6 +432,22 @@ router.get("/:id/versions", requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Fetch the currently pending correction request (if any) for an exam,
+// so the dashboard can show reviewers what's actually being proposed
+// before they approve or reject it.
+router.get("/:id/pending-correction", requireAuth, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT cr.*, u.name AS requested_by_name
+       FROM correction_requests cr JOIN users u ON u.id = cr.requested_by_id
+       WHERE cr.exam_id = $1 AND cr.status IN ('pending_admin','pending_headmaster')
+       ORDER BY cr.created_at DESC LIMIT 1`,
+      [req.params.id]
+    );
+    res.json(rows[0] || null);
+  } catch (err) { next(err); }
+});
+
 // Lists the generated report cards for the exam's current version, each
 // with a public verify link — this is what the dashboard shows staff so
 // they can hand out / re-share the same QR-verified PDFs parents get.
