@@ -1,6 +1,17 @@
 const express = require("express");
 const router = express.Router();
+const rateLimit = require("express-rate-limit");
 const { pool } = require("../db");
+
+// Parent Portal has no login, so this is the only real defense against
+// someone scripting through admission-number/phone combinations.
+const lookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many lookup attempts. Please wait 15 minutes and try again." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /**
  * Public lookup by admission number. Deliberately returns only exams that
@@ -28,7 +39,7 @@ function normalizePhone(p) {
  * down a guess field-by-field. Only exams that are 'published' or
  * 'locked' are ever returned — never a draft or in-progress mark.
  */
-router.get("/students/:admissionNo/results", async (req, res, next) => {
+router.get("/students/:admissionNo/results", lookupLimiter, async (req, res, next) => {
   const GENERIC_ERROR = "No results found for that admission number and phone number. Please check both and try again.";
   try {
     const { phone } = req.query;

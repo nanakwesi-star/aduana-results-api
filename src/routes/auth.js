@@ -2,7 +2,19 @@ const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const rateLimit = require("express-rate-limit");
 const { pool } = require("../db");
+
+// Much stricter than the app-wide limiter: login attempts are a classic
+// brute-force target, so this caps guesses per IP independently of
+// however much other traffic that IP is generating elsewhere.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many sign-in attempts. Please wait 15 minutes and try again." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /**
  * Real login. Compares the submitted password against the bcrypt hash
@@ -11,7 +23,7 @@ const { pool } = require("../db");
  * error whether the email doesn't exist or the password is wrong, so a
  * failed attempt can't be used to enumerate which staff emails exist.
  */
-router.post("/login", async (req, res, next) => {
+router.post("/login", loginLimiter, async (req, res, next) => {
   const GENERIC_ERROR = "Incorrect email or password.";
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
