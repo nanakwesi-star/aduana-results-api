@@ -10,6 +10,7 @@ const { router: verifyRoutes } = require("./routes/verify");
 const { router: studentRoutes } = require("./routes/students");
 const { router: publicRoutes } = require("./routes/public");
 const { router: authRoutes } = require("./routes/auth");
+const { router: adminRoutes } = require("./routes/admin");
 const { startLockScheduler } = require("./services/lockScheduler");
 
 const app = express();
@@ -27,6 +28,7 @@ app.use("/api/students", studentRoutes);
 app.use("/api/public", publicRoutes); // no auth — Parent Portal reads only
 app.use("/api/auth", authRoutes); // no auth — this IS the auth route
 app.use("/api/super-admin", superAdminRoutes);
+app.use("/api/admin", adminRoutes);
 app.use("/verify", verifyRoutes); // public, no auth — QR code target
 
 // Central error handler — every route above throws { status, message } on failure.
