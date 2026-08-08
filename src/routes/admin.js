@@ -141,4 +141,25 @@ router.delete("/classes/:id/subjects/:subject", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ---------------------------------------------------------------
+// Term settings — the single school-wide "current term," locked so
+// only Administrators can move it. Every exam created anywhere in the
+// system takes its term/year from here, not from anything a teacher types.
+// ---------------------------------------------------------------
+router.put("/settings/term", async (req, res, next) => {
+  const { term, academicYear } = req.body;
+  if (!term || !academicYear) return res.status(400).json({ error: "term and academicYear are required." });
+  try {
+    const { rows } = await pool.query(
+      `UPDATE term_settings SET term = $1, academic_year = $2, updated_by = $3, updated_at = now() WHERE id = 1 RETURNING *`,
+      [term, Number(academicYear), req.user.id]
+    );
+    await writeAuditLog(pool, {
+      examId: null, user: req.user, action: `Changed the school's current term to ${term} ${academicYear}.`,
+      previousValue: null, newValue: `${term} ${academicYear}`, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
 module.exports = { router };

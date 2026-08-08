@@ -8,25 +8,74 @@ const { sendResultSms, sendResultWhatsapp } = require("../services/mnotify");
 
 router.use(requireAuth, captureRequestContext);
 
+// Read-only for any signed-in staff member — this is what the "current
+// term" display and lock come from everywhere in the app.
+router.get("/settings/term", async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT term, academic_year FROM term_settings WHERE id = 1`);
+    res.json(rows[0] || null);
+  } catch (err) { next(err); }
+});
+
+// A teacher's own class/subject assignments, scoped to the current
+// locked academic year — this is exactly the dropdown the "new exam"
+// form needs, and nothing a teacher isn't actually assigned to appears.
+router.get("/my-assignments", requireRole("teacher"), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT sa.subject, c.id AS class_id, c.name AS class_name, c.academic_year
+       FROM subject_assignments sa
+       JOIN classes c ON c.id = sa.class_id
+       JOIN term_settings ts ON ts.academic_year = c.academic_year
+       WHERE sa.teacher_id = $1
+       ORDER BY c.name, sa.subject`,
+      [req.user.id]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 // ---------------------------------------------------------------
-// Create a new exam record (Teacher starts a draft)
+// Create a new exam record (Teacher starts a draft).
+// class + subject come from a dropdown of the teacher's real
+// assignments; term + year are never taken from the client at all —
+// they're always read fresh from the admin-locked term_settings row,
+// so there's no way to submit an exam for a term other than the
+// current one, no matter what the frontend sends.
 // ---------------------------------------------------------------
 router.post("/", requireRole("teacher"), async (req, res, next) => {
-  const { class: className, subject, term, academicYear } = req.body;
-  if (!className || !subject || !term || !academicYear) {
-    return res.status(400).json({ error: "class, subject, term, and academicYear are all required." });
-  }
+  const { classId, subject } = req.body;
+  if (!classId || !subject) return res.status(400).json({ error: "classId and subject are required." });
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+
+    const { rows: assignmentRows } = await client.query(
+      `SELECT sa.*, c.name AS class_name, c.academic_year FROM subject_assignments sa
+       JOIN classes c ON c.id = sa.class_id
+       WHERE sa.class_id = $1 AND sa.subject = $2 AND sa.teacher_id = $3`,
+      [classId, subject, req.user.id]
+    );
+    const assignment = assignmentRows[0];
+    if (!assignment) {
+      throw { status: 403, message: "You are not assigned to teach this subject for this class." };
+    }
+
+    const { rows: termRows } = await client.query(`SELECT term, academic_year FROM term_settings WHERE id = 1`);
+    const currentTerm = termRows[0];
+    if (!currentTerm || currentTerm.academic_year !== assignment.academic_year) {
+      throw { status: 409, message: "This class belongs to a different academic year than the current locked term." };
+    }
+
     const { rows } = await client.query(
-      `INSERT INTO exams (class, subject, term, academic_year, teacher_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [className, subject, term, academicYear, req.user.id]
+      `INSERT INTO exams (class, subject, term, academic_year, teacher_id, class_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [assignment.class_name, subject, currentTerm.term, currentTerm.academic_year, req.user.id, classId]
     );
     const exam = rows[0];
     await writeAuditLog(client, {
       examId: exam.id, user: req.user, action: "Created new exam record.",
-      previousValue: null, newValue: `${className} / ${subject} / ${term} ${academicYear}`,
+      previousValue: null, newValue: `${assignment.class_name} / ${subject} / ${currentTerm.term} ${currentTerm.academic_year}`,
       ip: req.auditContext.ip, device: req.auditContext.device,
     });
     await client.query("COMMIT");
