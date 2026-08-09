@@ -17,32 +17,42 @@ const loginLimiter = rateLimit({
 });
 
 /**
- * Real login. Compares the submitted password against the bcrypt hash
- * stored in users.password_hash — the plaintext password is never
- * stored or logged anywhere, only ever hashed. Returns the same generic
- * error whether the email doesn't exist or the password is wrong, so a
- * failed attempt can't be used to enumerate which staff emails exist.
+ * Real login, unified across every role. Staff and parents live in the
+ * `users` table; students have their credentials directly on their own
+ * `students` row instead of a separate account table, since a student's
+ * "account" and their academic record are naturally the same thing.
+ * Either way, the password is only ever compared as a bcrypt hash, and
+ * a failed attempt never reveals which table (or whether an account)
+ * matched, so this can't be used to enumerate real emails.
  */
 router.post("/login", loginLimiter, async (req, res, next) => {
   const GENERIC_ERROR = "Incorrect email or password.";
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
+  const normalizedEmail = email.toLowerCase().trim();
 
   try {
-    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1 AND active = TRUE`, [email.toLowerCase().trim()]);
-    const user = rows[0];
-    if (!user) return res.status(401).json({ error: GENERIC_ERROR });
+    const { rows: staffRows } = await pool.query(`SELECT * FROM users WHERE email = $1 AND active = TRUE`, [normalizedEmail]);
+    const staffUser = staffRows[0];
+    if (staffUser) {
+      const valid = await bcrypt.compare(password, staffUser.password_hash);
+      if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
+      const token = jwt.sign({ id: staffUser.id, name: staffUser.name, role: staffUser.role }, process.env.JWT_SECRET, { expiresIn: "12h" });
+      return res.json({ token, user: { id: staffUser.id, name: staffUser.name, role: staffUser.role, email: staffUser.email } });
+    }
 
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
-
-    const token = jwt.sign(
-      { id: user.id, name: user.name, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "12h" }
+    const { rows: studentRows } = await pool.query(
+      `SELECT * FROM students WHERE email = $1 AND active = TRUE AND password_hash IS NOT NULL`, [normalizedEmail]
     );
+    const student = studentRows[0];
+    if (student) {
+      const valid = await bcrypt.compare(password, student.password_hash);
+      if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
+      const token = jwt.sign({ id: student.id, name: student.full_name, role: "student" }, process.env.JWT_SECRET, { expiresIn: "12h" });
+      return res.json({ token, user: { id: student.id, name: student.full_name, role: "student", email: student.email } });
+    }
 
-    res.json({ token, user: { id: user.id, name: user.name, role: user.role, email: user.email } });
+    return res.status(401).json({ error: GENERIC_ERROR });
   } catch (err) { next(err); }
 });
 

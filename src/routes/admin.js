@@ -162,4 +162,100 @@ router.put("/settings/term", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ---------------------------------------------------------------
+// Parent accounts — a real login (unlike the old admission-number
+// lookup), linked to one or more children via parent_students.
+// ---------------------------------------------------------------
+router.get("/parents", async (req, res, next) => {
+  try {
+    const { rows: parents } = await pool.query(
+      `SELECT id, name, email, active, created_at FROM users WHERE role = 'parent' ORDER BY name`
+    );
+    const { rows: links } = await pool.query(
+      `SELECT ps.parent_id, s.id AS student_id, s.full_name, s.class, s.admission_no
+       FROM parent_students ps JOIN students s ON s.id = ps.student_id`
+    );
+    const byParent = {};
+    for (const l of links) (byParent[l.parent_id] ||= []).push({ studentId: l.student_id, fullName: l.full_name, class: l.class, admissionNo: l.admission_no });
+    res.json(parents.map((p) => ({ ...p, children: byParent[p.id] || [] })));
+  } catch (err) { next(err); }
+});
+
+router.post("/parents", async (req, res, next) => {
+  const { name, email, password, admissionNos } = req.body; // admissionNos: string[]
+  if (!name || !email || !password) return res.status(400).json({ error: "name, email, and password are required." });
+  if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const { rows } = await pool.query(
+      `INSERT INTO users (name, email, password_hash, role) VALUES ($1,$2,$3,'parent')
+       RETURNING id, name, email, role, active, created_at`,
+      [name, email.toLowerCase().trim(), passwordHash]
+    );
+    const parent = rows[0];
+
+    const linked = [];
+    const notFound = [];
+    for (const admissionNo of admissionNos || []) {
+      const { rows: studentRows } = await pool.query(`SELECT id, full_name FROM students WHERE admission_no = $1`, [admissionNo]);
+      if (!studentRows[0]) { notFound.push(admissionNo); continue; }
+      await pool.query(
+        `INSERT INTO parent_students (parent_id, student_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+        [parent.id, studentRows[0].id]
+      );
+      linked.push(studentRows[0].full_name);
+    }
+
+    await writeAuditLog(pool, {
+      examId: null, user: req.user, action: `Created parent account for ${name} (${email}), linked to: ${linked.join(", ") || "no children yet"}.`,
+      previousValue: null, newValue: parent.id, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+
+    res.status(201).json({ ...parent, linked, notFound });
+  } catch (err) {
+    if (err.code === "23505") return res.status(409).json({ error: "That email is already registered." });
+    next(err);
+  }
+});
+
+router.post("/parents/:id/link-student", async (req, res, next) => {
+  const { admissionNo } = req.body;
+  if (!admissionNo) return res.status(400).json({ error: "admissionNo is required." });
+  try {
+    const { rows: studentRows } = await pool.query(`SELECT id, full_name FROM students WHERE admission_no = $1`, [admissionNo]);
+    if (!studentRows[0]) return res.status(404).json({ error: "No student found with that admission number." });
+    await pool.query(`INSERT INTO parent_students (parent_id, student_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [req.params.id, studentRows[0].id]);
+    res.json({ ok: true, linked: studentRows[0].full_name });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------
+// Student login credentials — issued separately from admission,
+// since a spreadsheet-uploaded student normally starts with no
+// login at all until staff explicitly set one up.
+// ---------------------------------------------------------------
+router.post("/students/:id/set-credentials", async (req, res, next) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "email and password are required." });
+  if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const { rows } = await pool.query(
+      `UPDATE students SET email = $1, password_hash = $2, active = TRUE WHERE id = $3
+       RETURNING id, full_name, email, class, admission_no`,
+      [email.toLowerCase().trim(), passwordHash, req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Student not found." });
+    await writeAuditLog(pool, {
+      examId: null, user: req.user, action: `Issued login credentials to student ${rows[0].full_name} (${email}).`,
+      previousValue: null, newValue: rows[0].id, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === "23505") return res.status(409).json({ error: "That email is already in use." });
+    next(err);
+  }
+});
+
 module.exports = { router };
