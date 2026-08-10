@@ -133,6 +133,83 @@ router.put("/:id/marks", requireRole("teacher"), async (req, res, next) => {
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
+const multer = require("multer");
+const XLSX = require("xlsx");
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+function normalizeHeader(h) {
+  return String(h || "").toLowerCase().replace(/[^a-z]/g, "");
+}
+const MARKS_HEADER_MAP = {
+  admissionno: "admissionNo", admissionnumber: "admissionNo",
+  score: "score", mark: "score", marks: "score",
+  grade: "grade",
+  remarks: "remarks", remark: "remarks", comment: "remarks",
+};
+
+// Bulk marks entry from a spreadsheet — same permission rules and same
+// upsert-by-(exam,version,student) logic as the manual PUT /marks route,
+// just reading many rows from a file instead of one request body.
+router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("file"), async (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const exam = await getExamOr404(client, req.params.id);
+    assertLive(exam);
+    if (exam.teacher_id !== req.user.id) throw { status: 403, message: "You may only edit your own exam." };
+    if (!["draft", "admin_returned"].includes(exam.status)) {
+      throw { status: 409, message: "Marks can only be edited while in draft or returned status." };
+    }
+
+    const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+    const results = { updated: [], skipped: [], errors: [] };
+
+    for (let i = 0; i < rawRows.length; i++) {
+      const raw = rawRows[i];
+      const row = {};
+      for (const key of Object.keys(raw)) {
+        const mapped = MARKS_HEADER_MAP[normalizeHeader(key)];
+        if (mapped) row[mapped] = String(raw[key]).trim();
+      }
+      const admissionNo = row.admissionNo;
+      const score = Number(row.score);
+
+      if (!admissionNo || row.score === undefined || row.score === "" || Number.isNaN(score)) {
+        results.errors.push({ row: i + 2, reason: "Missing or invalid admission number / score." });
+        continue;
+      }
+
+      const { rows: studentRows } = await client.query(`SELECT id, full_name FROM students WHERE admission_no = $1`, [admissionNo]);
+      if (!studentRows[0]) {
+        results.skipped.push({ row: i + 2, admissionNo, reason: "No student found with this admission number." });
+        continue;
+      }
+
+      await client.query(
+        `INSERT INTO exam_marks (exam_id, version, student_id, score, grade, remarks)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (exam_id, version, student_id)
+         DO UPDATE SET score = EXCLUDED.score, grade = EXCLUDED.grade, remarks = EXCLUDED.remarks`,
+        [exam.id, exam.current_version, studentRows[0].id, score, row.grade || null, row.remarks || null]
+      );
+      results.updated.push(studentRows[0].full_name);
+    }
+
+    await writeAuditLog(client, {
+      examId: exam.id, user: req.user, action: `Bulk-uploaded marks from spreadsheet: ${results.updated.length} student(s) updated.`,
+      previousValue: null, newValue: `${results.updated.length} updated, ${results.skipped.length} skipped`,
+      ip: req.auditContext.ip, device: req.auditContext.device,
+    });
+
+    await client.query("COMMIT");
+    res.json(results);
+  } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
+});
+
 router.post("/:id/submit", requireRole("teacher"), async (req, res, next) => {
   const client = await pool.connect();
   try {
