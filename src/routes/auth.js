@@ -56,4 +56,34 @@ router.post("/login", loginLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const { requireAuth } = require("../middleware/auth");
+
+/**
+ * Self-service password change for any signed-in account — staff,
+ * parent, or student. Requires the current password before allowing a
+ * change, same as any normal "change password" flow, and always
+ * re-verifies it server-side rather than trusting that the person is
+ * who the token says (a stolen-but-still-valid token alone isn't
+ * enough to take over the account this way).
+ */
+router.post("/change-password", requireAuth, async (req, res, next) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: "Current and new password are required." });
+  if (newPassword.length < 8) return res.status(400).json({ error: "New password must be at least 8 characters." });
+
+  try {
+    const isStudent = req.user.role === "student";
+    const table = isStudent ? "students" : "users";
+    const { rows } = await pool.query(`SELECT password_hash FROM ${table} WHERE id = $1`, [req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Account not found." });
+
+    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: "Current password is incorrect." });
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(`UPDATE ${table} SET password_hash = $1 WHERE id = $2`, [newHash, req.user.id]);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = { router };

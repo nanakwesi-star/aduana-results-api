@@ -258,4 +258,27 @@ router.post("/students/:id/set-credentials", async (req, res, next) => {
   }
 });
 
+// Lets an Administrator reset a forgotten password for staff or
+// parents — the practical answer to "I forgot my password" without
+// any email/SMS reset infrastructure. Deliberately excludes
+// super_administrator: that role stays outside normal admin control,
+// same reasoning as it being uncreatable through this panel.
+router.patch("/users/:id/reset-password", async (req, res, next) => {
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 8) return res.status(400).json({ error: "New password must be at least 8 characters." });
+  try {
+    const { rows: targetRows } = await pool.query(`SELECT role FROM users WHERE id = $1`, [req.params.id]);
+    if (!targetRows[0]) return res.status(404).json({ error: "Account not found." });
+    if (targetRows[0].role === "super_administrator") return res.status(403).json({ error: "Super Administrator passwords cannot be reset from here." });
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [newHash, req.params.id]);
+    await writeAuditLog(pool, {
+      examId: null, user: req.user, action: `Reset password for account ${req.params.id}.`,
+      previousValue: null, newValue: null, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = { router };
