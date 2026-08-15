@@ -1,15 +1,19 @@
 const express = require("express");
 const router = express.Router();
+const multer = require("multer");
+const XLSX = require("xlsx");
+
 const { pool } = require("../db");
 const { requireAuth, requireRole, captureRequestContext } = require("../middleware/auth");
 const { writeAuditLog } = require("../services/auditLog");
 const { generateReportCard, generateBroadsheet } = require("../services/pdfGenerator");
 const { sendResultSms, sendResultWhatsapp } = require("../services/mnotify");
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
 router.use(requireAuth, captureRequestContext);
 
-// Read-only for any signed-in staff member — this is what the "current
-// term" display and lock come from everywhere in the app.
+// Read-only term settings
 router.get("/settings/term", async (req, res, next) => {
   try {
     const { rows } = await pool.query(`SELECT term, academic_year FROM term_settings WHERE id = 1`);
@@ -17,9 +21,7 @@ router.get("/settings/term", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A teacher's own class/subject assignments, scoped to the current
-// locked academic year — this is exactly the dropdown the "new exam"
-// form needs, and nothing a teacher isn't actually assigned to appears.
+// Teacher class/subject assignments
 router.get("/my-assignments", requireRole("teacher"), async (req, res, next) => {
   try {
     const { rows } = await pool.query(
@@ -35,14 +37,7 @@ router.get("/my-assignments", requireRole("teacher"), async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// ---------------------------------------------------------------
-// Create a new exam record (Teacher starts a draft).
-// class + subject come from a dropdown of the teacher's real
-// assignments; term + year are never taken from the client at all —
-// they're always read fresh from the admin-locked term_settings row,
-// so there's no way to submit an exam for a term other than the
-// current one, no matter what the frontend sends.
-// ---------------------------------------------------------------
+// Create new examination record
 router.post("/", requireRole("teacher"), async (req, res, next) => {
   const { classId, subject } = req.body;
   if (!classId || !subject) return res.status(400).json({ error: "classId and subject are required." });
@@ -92,13 +87,13 @@ async function getExamOr404(client, id) {
 function assertLive(exam) {
   if (exam.status === "locked") {
     const err = new Error("This examination has been permanently locked after the 21-day validation period. No further modifications are permitted.");
-    err.status = 423; // Locked
+    err.status = 423;
     throw err;
   }
 }
 
 // ---------------------------------------------------------------
-// STAGE 1 — Teacher: edit marks (only in draft / admin_returned)
+// STAGE 1 — Teacher: edit marks with 50 Class / 50 Exam validation
 // ---------------------------------------------------------------
 router.put("/:id/marks", requireRole("teacher"), async (req, res, next) => {
   const client = await pool.connect();
@@ -111,19 +106,33 @@ router.put("/:id/marks", requireRole("teacher"), async (req, res, next) => {
       throw { status: 409, message: "Marks can only be edited while in draft or returned status." };
     }
 
-    const { marks } = req.body; // [{ student_id, score, grade?, remarks? }]
+    const { marks } = req.body; // [{ student_id, class_score, exam_score, grade?, remarks? }]
     for (const m of marks) {
+      const classScore = Number(m.class_score || 0);
+      const examScore = Number(m.exam_score || 0);
+
+      if (classScore < 0 || classScore > 50) {
+        throw { status: 400, message: `Class score for student ID ${m.student_id} must be between 0 and 50.` };
+      }
+      if (examScore < 0 || examScore > 50) {
+        throw { status: 400, message: `Exam score for student ID ${m.student_id} must be between 0 and 50.` };
+      }
+
       await client.query(
-        `INSERT INTO exam_marks (exam_id, version, student_id, score, grade, remarks)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        `INSERT INTO exam_marks (exam_id, version, student_id, class_score, exam_score, grade, remarks)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
          ON CONFLICT (exam_id, version, student_id)
-         DO UPDATE SET score = EXCLUDED.score, grade = EXCLUDED.grade, remarks = EXCLUDED.remarks`,
-        [exam.id, exam.current_version, m.student_id, m.score, m.grade || null, m.remarks || null]
+         DO UPDATE SET 
+           class_score = EXCLUDED.class_score,
+           exam_score = EXCLUDED.exam_score,
+           grade = EXCLUDED.grade, 
+           remarks = EXCLUDED.remarks`,
+        [exam.id, exam.current_version, m.student_id, classScore, examScore, m.grade || null, m.remarks || null]
       );
     }
 
     await writeAuditLog(client, {
-      examId: exam.id, user: req.user, action: "Edited marks prior to submission.",
+      examId: exam.id, user: req.user, action: "Edited 50/50 marks prior to submission.",
       previousValue: null, newValue: `${marks.length} student score(s) updated`,
       ip: req.auditContext.ip, device: req.auditContext.device,
     });
@@ -133,23 +142,19 @@ router.put("/:id/marks", requireRole("teacher"), async (req, res, next) => {
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
-const multer = require("multer");
-const XLSX = require("xlsx");
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-
+// Excel Spreadsheet Bulk Upload Mapping
 function normalizeHeader(h) {
   return String(h || "").toLowerCase().replace(/[^a-z]/g, "");
 }
+
 const MARKS_HEADER_MAP = {
   admissionno: "admissionNo", admissionnumber: "admissionNo",
-  score: "score", mark: "score", marks: "score",
+  classscore: "classScore", ca: "classScore", continuousassessment: "classScore",
+  examscore: "examScore", exam: "examScore", examination: "examScore",
   grade: "grade",
   remarks: "remarks", remark: "remarks", comment: "remarks",
 };
 
-// Bulk marks entry from a spreadsheet — same permission rules and same
-// upsert-by-(exam,version,student) logic as the manual PUT /marks route,
-// just reading many rows from a file instead of one request body.
 router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("file"), async (req, res, next) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded." });
   const client = await pool.connect();
@@ -175,11 +180,18 @@ router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("fil
         const mapped = MARKS_HEADER_MAP[normalizeHeader(key)];
         if (mapped) row[mapped] = String(raw[key]).trim();
       }
+      
       const admissionNo = row.admissionNo;
-      const score = Number(row.score);
+      const classScore = Number(row.classScore || 0);
+      const examScore = Number(row.examScore || 0);
 
-      if (!admissionNo || row.score === undefined || row.score === "" || Number.isNaN(score)) {
-        results.errors.push({ row: i + 2, reason: "Missing or invalid admission number / score." });
+      if (!admissionNo || Number.isNaN(classScore) || Number.isNaN(examScore)) {
+        results.errors.push({ row: i + 2, reason: "Missing or invalid admission number or scores." });
+        continue;
+      }
+
+      if (classScore < 0 || classScore > 50 || examScore < 0 || examScore > 50) {
+        results.errors.push({ row: i + 2, reason: "Scores must be 0-50 for both Class Score and Exam Score." });
         continue;
       }
 
@@ -190,17 +202,21 @@ router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("fil
       }
 
       await client.query(
-        `INSERT INTO exam_marks (exam_id, version, student_id, score, grade, remarks)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        `INSERT INTO exam_marks (exam_id, version, student_id, class_score, exam_score, grade, remarks)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
          ON CONFLICT (exam_id, version, student_id)
-         DO UPDATE SET score = EXCLUDED.score, grade = EXCLUDED.grade, remarks = EXCLUDED.remarks`,
-        [exam.id, exam.current_version, studentRows[0].id, score, row.grade || null, row.remarks || null]
+         DO UPDATE SET 
+           class_score = EXCLUDED.class_score,
+           exam_score = EXCLUDED.exam_score,
+           grade = EXCLUDED.grade, 
+           remarks = EXCLUDED.remarks`,
+        [exam.id, exam.current_version, studentRows[0].id, classScore, examScore, row.grade || null, row.remarks || null]
       );
       results.updated.push(studentRows[0].full_name);
     }
 
     await writeAuditLog(client, {
-      examId: exam.id, user: req.user, action: `Bulk-uploaded marks from spreadsheet: ${results.updated.length} student(s) updated.`,
+      examId: exam.id, user: req.user, action: `Bulk-uploaded marks: ${results.updated.length} student(s) updated.`,
       previousValue: null, newValue: `${results.updated.length} updated, ${results.skipped.length} skipped`,
       ip: req.auditContext.ip, device: req.auditContext.device,
     });
@@ -210,6 +226,20 @@ router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("fil
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
+// Admin defines dynamic assessment categories
+router.post("/assessments/config", requireRole("administrator", "super_administrator"), async (req, res, next) => {
+  const { academicYear, term, className, subject, title, maxScore } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO assessment_categories (academic_year, term, class_name, subject, title, max_score)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [academicYear, term, className, subject, title, maxScore || 10]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { next(err); }
+});
+
+// STAGE 1 -> Teacher Submits
 router.post("/:id/submit", requireRole("teacher"), async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -231,9 +261,7 @@ router.post("/:id/submit", requireRole("teacher"), async (req, res, next) => {
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
-// ---------------------------------------------------------------
-// STAGE 2 — Administrator review
-// ---------------------------------------------------------------
+// STAGE 2 -> Admin Approve
 router.post("/:id/admin-approve", requireRole("administrator"), async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -254,6 +282,7 @@ router.post("/:id/admin-approve", requireRole("administrator"), async (req, res,
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
+// STAGE 2 -> Admin Return to Teacher
 router.post("/:id/admin-return", requireRole("administrator"), async (req, res, next) => {
   const { reason } = req.body;
   if (!reason?.trim()) return res.status(400).json({ error: "A comment is required to return work to the teacher." });
@@ -277,9 +306,7 @@ router.post("/:id/admin-return", requireRole("administrator"), async (req, res, 
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
-// ---------------------------------------------------------------
-// STAGE 3 — Headmaster final validation
-// ---------------------------------------------------------------
+// STAGE 3 -> Headmaster Return to Admin
 router.post("/:id/hm-return", requireRole("headmaster"), async (req, res, next) => {
   const { reason } = req.body;
   if (!reason?.trim()) return res.status(400).json({ error: "A comment is required to return work to the Administrator." });
@@ -303,10 +330,7 @@ router.post("/:id/hm-return", requireRole("headmaster"), async (req, res, next) 
   } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
 });
 
-// Only the Headmaster may publish. This is the single most consequential
-// endpoint in the system: it flips status, stamps the 21-day lock date,
-// snapshots version 1, generates every document, and queues notifications
-// — all inside one transaction so nothing half-publishes.
+// STAGE 3 -> Headmaster Publish
 router.post("/:id/publish", requireRole("headmaster"), async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -336,7 +360,7 @@ router.post("/:id/publish", requireRole("headmaster"), async (req, res, next) =>
     );
 
     for (const row of marksRows) {
-      const { verifyUrl } = await generateReportCard({
+      await generateReportCard({
         exam, student: { id: row.student_id, full_name: row.full_name },
         version: exam.current_version, marksRow: row, dbClient: client,
       });
@@ -359,14 +383,13 @@ router.post("/:id/publish", requireRole("headmaster"), async (req, res, next) =>
 
     await writeAuditLog(client, {
       examId: exam.id, user: req.user,
-      action: "Approved and PUBLISHED official results. Report cards & broadsheets generated. Parent Portal updated. Notifications queued.",
+      action: "Approved and PUBLISHED official results. Report cards & broadsheets generated.",
       previousValue: "admin_approved", newValue: "published",
       ip: req.auditContext.ip, device: req.auditContext.device,
     });
 
     await client.query("COMMIT");
 
-    // Fire notifications after commit so a provider outage never blocks publication.
     dispatchQueuedNotifications(exam.id).catch((e) => console.error("Notification dispatch error:", e));
 
     res.json({ ok: true, status: "published", publishedAt, lockAt });
@@ -392,129 +415,7 @@ async function dispatchQueuedNotifications(examId) {
   }
 }
 
-// ---------------------------------------------------------------
-// 21-DAY WINDOW — Correction requests
-// ---------------------------------------------------------------
-router.post("/:id/corrections", requireRole("teacher", "administrator", "headmaster"), async (req, res, next) => {
-  const { reason, proposedMarks } = req.body;
-  if (!reason?.trim()) return res.status(400).json({ error: "A written reason is required for a correction request." });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const exam = await getExamOr404(client, req.params.id);
-    if (exam.status !== "published") throw { status: 409, message: "Corrections can only be requested against a published record within its 21-day window." };
-    if (new Date() >= new Date(exam.lock_at)) throw { status: 423, message: "The 21-day correction window has closed." };
-
-    const { rows } = await client.query(
-      `INSERT INTO correction_requests (exam_id, requested_by_id, reason, proposed_marks)
-       VALUES ($1,$2,$3,$4) RETURNING id`,
-      [exam.id, req.user.id, reason, JSON.stringify(proposedMarks)]
-    );
-    await client.query(`UPDATE exams SET status = 'correction_pending_admin' WHERE id = $1`, [exam.id]);
-    await writeAuditLog(client, {
-      examId: exam.id, user: req.user, action: "Filed a formal Correction Request against published results.",
-      previousValue: "published", newValue: "correction_pending_admin", reason,
-      ip: req.auditContext.ip, device: req.auditContext.device,
-    });
-
-    await client.query("COMMIT");
-    res.json({ ok: true, correctionRequestId: rows[0].id });
-  } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
-});
-
-router.post("/corrections/:crId/admin-decision", requireRole("administrator"), async (req, res, next) => {
-  const { approve, reason } = req.body;
-  if (!approve && !reason?.trim()) return res.status(400).json({ error: "A reason is required to reject a correction request." });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const { rows: crRows } = await client.query(`SELECT * FROM correction_requests WHERE id = $1`, [req.params.crId]);
-    const cr = crRows[0];
-    if (!cr || cr.status !== "pending_admin") throw { status: 409, message: "This correction request is not awaiting Administrator decision." };
-    const exam = await getExamOr404(client, cr.exam_id);
-
-    if (approve) {
-      await client.query(`UPDATE correction_requests SET status = 'pending_headmaster', admin_decided_by = $1, admin_decided_at = now() WHERE id = $2`, [req.user.id, cr.id]);
-      await client.query(`UPDATE exams SET status = 'correction_pending_hm' WHERE id = $1`, [exam.id]);
-      await writeAuditLog(client, { examId: exam.id, user: req.user, action: "Approved Correction Request; forwarded to Headmaster for final approval.", previousValue: "correction_pending_admin", newValue: "correction_pending_hm", ip: req.auditContext.ip, device: req.auditContext.device });
-    } else {
-      await client.query(`UPDATE correction_requests SET status = 'rejected_admin', admin_decided_by = $1, admin_decided_at = now(), admin_decision_reason = $2 WHERE id = $3`, [req.user.id, reason, cr.id]);
-      await client.query(`UPDATE exams SET status = 'published' WHERE id = $1`, [exam.id]);
-      await writeAuditLog(client, { examId: exam.id, user: req.user, action: "Rejected Correction Request. Published record unchanged.", previousValue: "correction_pending_admin", newValue: "published", reason, ip: req.auditContext.ip, device: req.auditContext.device });
-    }
-
-    await client.query("COMMIT");
-    res.json({ ok: true });
-  } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
-});
-
-// Final approval creates the new version, preserving every prior one.
-router.post("/corrections/:crId/headmaster-decision", requireRole("headmaster"), async (req, res, next) => {
-  const { approve, reason } = req.body;
-  if (!approve && !reason?.trim()) return res.status(400).json({ error: "A reason is required to reject a correction request." });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const { rows: crRows } = await client.query(`SELECT * FROM correction_requests WHERE id = $1`, [req.params.crId]);
-    const cr = crRows[0];
-    if (!cr || cr.status !== "pending_headmaster") throw { status: 409, message: "This correction request is not awaiting Headmaster decision." };
-    const exam = await getExamOr404(client, cr.exam_id);
-    assertLive(exam);
-
-    if (approve) {
-      const newVersion = exam.current_version + 1;
-      for (const m of cr.proposed_marks) {
-        await client.query(
-          `INSERT INTO exam_marks (exam_id, version, student_id, score, grade, remarks) VALUES ($1,$2,$3,$4,$5,$6)`,
-          [exam.id, newVersion, m.student_id, m.score, m.grade || null, m.remarks || null]
-        );
-      }
-      await client.query(
-        `INSERT INTO exam_versions (exam_id, version, changed_by_user_id, admin_approver_id, headmaster_approver_id, note, is_correction)
-         VALUES ($1,$2,$3,$4,$5,$6,TRUE)`,
-        [exam.id, newVersion, cr.requested_by_id, cr.admin_decided_by, req.user.id, cr.reason]
-      );
-      await client.query(`UPDATE exams SET status = 'published', current_version = $1 WHERE id = $2`, [newVersion, exam.id]);
-      await client.query(`UPDATE correction_requests SET status = 'approved', headmaster_decided_by = $1, headmaster_decided_at = now(), resulting_version = $2 WHERE id = $3`, [req.user.id, newVersion, cr.id]);
-
-      // Regenerate documents for the new version only — old version's PDFs remain untouched in report_cards/broadsheets.
-      const { rows: marksRows } = await client.query(
-        `SELECT em.*, s.full_name FROM exam_marks em JOIN students s ON s.id = em.student_id WHERE em.exam_id = $1 AND em.version = $2`,
-        [exam.id, newVersion]
-      );
-      for (const row of marksRows) {
-        await generateReportCard({ exam: { ...exam, current_version: newVersion }, student: { id: row.student_id, full_name: row.full_name }, version: newVersion, marksRow: row, dbClient: client });
-      }
-      await generateBroadsheet({ exam, version: newVersion, marksRows, dbClient: client });
-
-      await writeAuditLog(client, {
-        examId: exam.id, user: req.user,
-        action: `Approved Correction Request. New version v${newVersion} created; previous versions preserved.`,
-        previousValue: "correction_pending_hm", newValue: "published",
-        ip: req.auditContext.ip, device: req.auditContext.device,
-      });
-    } else {
-      await client.query(`UPDATE exams SET status = 'published' WHERE id = $1`, [exam.id]);
-      await client.query(`UPDATE correction_requests SET status = 'rejected_headmaster', headmaster_decided_by = $1, headmaster_decided_at = now(), headmaster_decision_reason = $2 WHERE id = $3`, [req.user.id, reason, cr.id]);
-      await writeAuditLog(client, { examId: exam.id, user: req.user, action: "Rejected Correction Request at final stage. Published record unchanged.", previousValue: "correction_pending_hm", newValue: "published", reason, ip: req.auditContext.ip, device: req.auditContext.device });
-    }
-
-    await client.query("COMMIT");
-    res.json({ ok: true });
-  } catch (err) { await client.query("ROLLBACK"); next(err); } finally { client.release(); }
-});
-
-// ---------------------------------------------------------------
-// Read endpoints
-// ---------------------------------------------------------------
-// ---------------------------------------------------------------
-// Read endpoints
-// ---------------------------------------------------------------
-// List exams. Teachers see only their own; Administrator/Headmaster/
-// Super Admin see everything, since they need visibility across the school.
+// Fetch all exams
 router.get("/", async (req, res, next) => {
   try {
     const isStaff = ["administrator", "headmaster", "super_administrator"].includes(req.user.role);
@@ -525,7 +426,7 @@ router.get("/", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Single exam with its current marks attached, for the detail view.
+// Fetch single exam by ID
 router.get("/:id", async (req, res, next) => {
   try {
     const { rows } = await pool.query(
@@ -541,60 +442,6 @@ router.get("/:id", async (req, res, next) => {
       [exam.id, exam.current_version]
     );
     res.json({ ...exam, marks });
-  } catch (err) { next(err); }
-});
-
-router.get("/:id/audit-log", requireRole("administrator", "headmaster", "super_administrator"), async (req, res, next) => {
-  try {
-    const { rows } = await pool.query(`SELECT * FROM audit_log WHERE exam_id = $1 ORDER BY id ASC`, [req.params.id]);
-    res.json(rows);
-  } catch (err) { next(err); }
-});
-
-router.get("/:id/versions", requireAuth, async (req, res, next) => {
-  try {
-    const { rows } = await pool.query(`SELECT * FROM exam_versions WHERE exam_id = $1 ORDER BY version ASC`, [req.params.id]);
-    res.json(rows);
-  } catch (err) { next(err); }
-});
-
-// Fetch the currently pending correction request (if any) for an exam,
-// so the dashboard can show reviewers what's actually being proposed
-// before they approve or reject it.
-router.get("/:id/pending-correction", requireAuth, async (req, res, next) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT cr.*, u.name AS requested_by_name
-       FROM correction_requests cr JOIN users u ON u.id = cr.requested_by_id
-       WHERE cr.exam_id = $1 AND cr.status IN ('pending_admin','pending_headmaster')
-       ORDER BY cr.created_at DESC LIMIT 1`,
-      [req.params.id]
-    );
-    res.json(rows[0] || null);
-  } catch (err) { next(err); }
-});
-
-// Lists the generated report cards for the exam's current version, each
-// with a public verify link — this is what the dashboard shows staff so
-// they can hand out / re-share the same QR-verified PDFs parents get.
-router.get("/:id/report-cards", requireAuth, async (req, res, next) => {
-  try {
-    const { rows: examRows } = await pool.query(`SELECT current_version FROM exams WHERE id = $1`, [req.params.id]);
-    if (!examRows[0]) return res.status(404).json({ error: "Examination not found." });
-
-    const { rows } = await pool.query(
-      `SELECT rc.qr_token, rc.generated_at, s.full_name
-       FROM report_cards rc JOIN students s ON s.id = rc.student_id
-       WHERE rc.exam_id = $1 AND rc.version = $2 ORDER BY s.full_name`,
-      [req.params.id, examRows[0].current_version]
-    );
-    const base = process.env.PORTAL_BASE_URL || "";
-    res.json(rows.map((r) => ({
-      studentName: r.full_name,
-      generatedAt: r.generated_at,
-      verifyUrl: `${base}/verify/${r.qr_token}`,
-      pdfUrl: `${base}/verify/${r.qr_token}/pdf`,
-    })));
   } catch (err) { next(err); }
 });
 
