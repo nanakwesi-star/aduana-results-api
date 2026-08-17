@@ -65,6 +65,74 @@ router.patch("/users/:id/deactivate", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Permanently removes a staff account. Super Administrator accounts and
+// your own currently-signed-in account are protected. Any exams this
+// person created (and everything tied to those exams — marks, versions,
+// correction requests, notifications, report cards, broadsheets, audit
+// entries) are deleted along with them, since none of that can
+// meaningfully exist without the exam it belongs to. If deleting still
+// fails — e.g. because this person approved or reviewed exams that
+// belong to OTHER teachers — that's surfaced as a clear error rather
+// than silently breaking someone else's records.
+router.delete("/users/:id", async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const { rows: targetRows } = await client.query(`SELECT id, name, email, role FROM users WHERE id = $1`, [req.params.id]);
+    const target = targetRows[0];
+    if (!target) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Staff account not found." }); }
+    if (target.role === "super_administrator") {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "Super Administrator accounts cannot be deleted from here." });
+    }
+    if (target.id === req.user.id) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "You cannot delete your own account while signed in." });
+    }
+
+    // Detach this person from classes/subjects they're currently assigned to.
+    await client.query(`UPDATE classes SET form_master_id = NULL WHERE form_master_id = $1`, [req.params.id]);
+    await client.query(`DELETE FROM subject_assignments WHERE teacher_id = $1`, [req.params.id]);
+
+    // Delete every exam this person created, and everything tied to it.
+    const { rows: examRows } = await client.query(`SELECT id FROM exams WHERE teacher_id = $1`, [req.params.id]);
+    const examIds = examRows.map((r) => r.id);
+    if (examIds.length > 0) {
+      await client.query(`DELETE FROM exam_marks WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM exam_versions WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM correction_requests WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM notifications WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM report_cards WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM broadsheets WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM audit_log WHERE exam_id = ANY($1)`, [examIds]);
+      await client.query(`DELETE FROM exams WHERE id = ANY($1)`, [examIds]);
+    }
+
+    await client.query(`DELETE FROM users WHERE id = $1`, [req.params.id]);
+
+    await client.query("COMMIT");
+
+    await writeAuditLog(pool, {
+      examId: null, user: req.user,
+      action: `Permanently deleted ${target.role} account: ${target.name} (${target.email}), including ${examIds.length} exam(s) they created.`,
+      previousValue: target.id, newValue: null, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+
+    res.json({ ok: true, deletedExamCount: examIds.length });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    if (err.code === "23503") {
+      return res.status(409).json({
+        error: "This account can't be deleted because other records still reference it — for example, they approved or reviewed exams belonging to other teachers. Consider using Deactivate instead, which blocks their login but keeps the school's history intact."
+      });
+    }
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
 // ---------------------------------------------------------------
 // Classes
 // ---------------------------------------------------------------
@@ -137,6 +205,30 @@ router.delete("/classes/:id/subjects/:subject", async (req, res, next) => {
       `DELETE FROM subject_assignments WHERE class_id = $1 AND subject = $2`,
       [req.params.id, req.params.subject]
     );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// Permanently deletes a class. Blocked if the class has any exams on
+// record — those are real academic history and shouldn't disappear
+// silently just because the class row is removed. Delete or reassign
+// those exams first if the class genuinely needs to go.
+router.delete("/classes/:id", async (req, res, next) => {
+  try {
+    const { rows: examRows } = await pool.query(`SELECT COUNT(*)::int AS count FROM exams WHERE class_id = $1`, [req.params.id]);
+    if (examRows[0].count > 0) {
+      return res.status(409).json({ error: `This class has ${examRows[0].count} exam(s) on record and can't be deleted. Remove those exams first if you're sure you want to delete the class.` });
+    }
+
+    await pool.query(`DELETE FROM subject_assignments WHERE class_id = $1`, [req.params.id]);
+    const { rows } = await pool.query(`DELETE FROM classes WHERE id = $1 RETURNING id, name`, [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Class not found." });
+
+    await writeAuditLog(pool, {
+      examId: null, user: req.user, action: `Deleted class ${rows[0].name}.`,
+      previousValue: rows[0].id, newValue: null, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
