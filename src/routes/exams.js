@@ -93,8 +93,24 @@ function assertLive(exam) {
 }
 
 // ---------------------------------------------------------------
-// STAGE 1 — Teacher: edit marks with 50 Class / 50 Exam validation
+// STAGE 1 — Teacher: edit marks — Continuous Assessment model
+//
+//   Class Work = Individual Test (0-15) + Group Work (0-15)
+//              + Class Test (0-15) + Project (0-15)
+//              = raw total out of 60, scaled to 50
+//   Exam       = entered raw out of 100, scaled to 50
+//   class_score / exam_score keep their old names + meaning (both out of
+//   50, summing via the generated "score" column to a /100 total) so
+//   nothing downstream (report cards, broadsheets, positions) needs to
+//   change — only what feeds into them does.
 // ---------------------------------------------------------------
+function scaleContinuousAssessment({ individualTest, groupWork, classTest, project, examRaw }) {
+  const classworkRaw = individualTest + groupWork + classTest + project; // out of 60
+  const classScore = Math.round((classworkRaw * 50 / 60) * 100) / 100;   // scaled to 50, 2dp
+  const examScore = Math.round((examRaw * 50 / 100) * 100) / 100;        // scaled to 50, 2dp
+  return { classScore, examScore };
+}
+
 router.put("/:id/marks", requireRole("teacher"), async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -106,33 +122,51 @@ router.put("/:id/marks", requireRole("teacher"), async (req, res, next) => {
       throw { status: 409, message: "Marks can only be edited while in draft or returned status." };
     }
 
-    const { marks } = req.body; // [{ student_id, class_score, exam_score, grade?, remarks? }]
+    const { marks } = req.body; // [{ student_id, individual_test, group_work, class_test, project, exam_raw, grade?, remarks? }]
     for (const m of marks) {
-      const classScore = Number(m.class_score || 0);
-      const examScore = Number(m.exam_score || 0);
+      const individualTest = Number(m.individual_test || 0);
+      const groupWork = Number(m.group_work || 0);
+      const classTest = Number(m.class_test || 0);
+      const project = Number(m.project || 0);
+      const examRaw = Number(m.exam_raw || 0);
 
-      if (classScore < 0 || classScore > 50) {
-        throw { status: 400, message: `Class score for student ID ${m.student_id} must be between 0 and 50.` };
+      const components = [
+        ["Individual Test", individualTest],
+        ["Group Work", groupWork],
+        ["Class Test", classTest],
+        ["Project", project],
+      ];
+      for (const [label, val] of components) {
+        if (val < 0 || val > 15) {
+          throw { status: 400, message: `${label} for student ID ${m.student_id} must be between 0 and 15.` };
+        }
       }
-      if (examScore < 0 || examScore > 50) {
-        throw { status: 400, message: `Exam score for student ID ${m.student_id} must be between 0 and 50.` };
+      if (examRaw < 0 || examRaw > 100) {
+        throw { status: 400, message: `Exam score for student ID ${m.student_id} must be between 0 and 100.` };
       }
+
+      const { classScore, examScore } = scaleContinuousAssessment({ individualTest, groupWork, classTest, project, examRaw });
 
       await client.query(
-        `INSERT INTO exam_marks (exam_id, version, student_id, class_score, exam_score, grade, remarks)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
+        `INSERT INTO exam_marks (exam_id, version, student_id, individual_test, group_work, class_test, project, exam_raw, class_score, exam_score, grade, remarks)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          ON CONFLICT (exam_id, version, student_id)
-         DO UPDATE SET 
+         DO UPDATE SET
+           individual_test = EXCLUDED.individual_test,
+           group_work = EXCLUDED.group_work,
+           class_test = EXCLUDED.class_test,
+           project = EXCLUDED.project,
+           exam_raw = EXCLUDED.exam_raw,
            class_score = EXCLUDED.class_score,
            exam_score = EXCLUDED.exam_score,
-           grade = EXCLUDED.grade, 
+           grade = EXCLUDED.grade,
            remarks = EXCLUDED.remarks`,
-        [exam.id, exam.current_version, m.student_id, classScore, examScore, m.grade || null, m.remarks || null]
+        [exam.id, exam.current_version, m.student_id, individualTest, groupWork, classTest, project, examRaw, classScore, examScore, m.grade || null, m.remarks || null]
       );
     }
 
     await writeAuditLog(client, {
-      examId: exam.id, user: req.user, action: "Edited 50/50 marks prior to submission.",
+      examId: exam.id, user: req.user, action: "Edited Continuous Assessment marks prior to submission.",
       previousValue: null, newValue: `${marks.length} student score(s) updated`,
       ip: req.auditContext.ip, device: req.auditContext.device,
     });
@@ -149,8 +183,11 @@ function normalizeHeader(h) {
 
 const MARKS_HEADER_MAP = {
   admissionno: "admissionNo", admissionnumber: "admissionNo",
-  classscore: "classScore", ca: "classScore", continuousassessment: "classScore",
-  examscore: "examScore", exam: "examScore", examination: "examScore",
+  individualtest: "individualTest", indtest: "individualTest", individual: "individualTest", test: "individualTest",
+  groupwork: "groupWork", group: "groupWork",
+  classtest: "classTest",
+  project: "project",
+  exam: "examRaw", examscore: "examRaw", examination: "examRaw", examraw: "examRaw",
   grade: "grade",
   remarks: "remarks", remark: "remarks", comment: "remarks",
 };
@@ -180,18 +217,25 @@ router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("fil
         const mapped = MARKS_HEADER_MAP[normalizeHeader(key)];
         if (mapped) row[mapped] = String(raw[key]).trim();
       }
-      
-      const admissionNo = row.admissionNo;
-      const classScore = Number(row.classScore || 0);
-      const examScore = Number(row.examScore || 0);
 
-      if (!admissionNo || Number.isNaN(classScore) || Number.isNaN(examScore)) {
+      const admissionNo = row.admissionNo;
+      const individualTest = Number(row.individualTest || 0);
+      const groupWork = Number(row.groupWork || 0);
+      const classTest = Number(row.classTest || 0);
+      const project = Number(row.project || 0);
+      const examRaw = Number(row.examRaw || 0);
+
+      if (!admissionNo || [individualTest, groupWork, classTest, project, examRaw].some((v) => Number.isNaN(v))) {
         results.errors.push({ row: i + 2, reason: "Missing or invalid admission number or scores." });
         continue;
       }
 
-      if (classScore < 0 || classScore > 50 || examScore < 0 || examScore > 50) {
-        results.errors.push({ row: i + 2, reason: "Scores must be 0-50 for both Class Score and Exam Score." });
+      if ([individualTest, groupWork, classTest, project].some((v) => v < 0 || v > 15)) {
+        results.errors.push({ row: i + 2, reason: "Individual Test, Group Work, Class Test, and Project must each be 0-15." });
+        continue;
+      }
+      if (examRaw < 0 || examRaw > 100) {
+        results.errors.push({ row: i + 2, reason: "Exam score must be 0-100." });
         continue;
       }
 
@@ -201,16 +245,23 @@ router.post("/:id/marks/bulk-upload", requireRole("teacher"), upload.single("fil
         continue;
       }
 
+      const { classScore, examScore } = scaleContinuousAssessment({ individualTest, groupWork, classTest, project, examRaw });
+
       await client.query(
-        `INSERT INTO exam_marks (exam_id, version, student_id, class_score, exam_score, grade, remarks)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
+        `INSERT INTO exam_marks (exam_id, version, student_id, individual_test, group_work, class_test, project, exam_raw, class_score, exam_score, grade, remarks)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          ON CONFLICT (exam_id, version, student_id)
-         DO UPDATE SET 
+         DO UPDATE SET
+           individual_test = EXCLUDED.individual_test,
+           group_work = EXCLUDED.group_work,
+           class_test = EXCLUDED.class_test,
+           project = EXCLUDED.project,
+           exam_raw = EXCLUDED.exam_raw,
            class_score = EXCLUDED.class_score,
            exam_score = EXCLUDED.exam_score,
-           grade = EXCLUDED.grade, 
+           grade = EXCLUDED.grade,
            remarks = EXCLUDED.remarks`,
-        [exam.id, exam.current_version, studentRows[0].id, classScore, examScore, row.grade || null, row.remarks || null]
+        [exam.id, exam.current_version, studentRows[0].id, individualTest, groupWork, classTest, project, examRaw, classScore, examScore, row.grade || null, row.remarks || null]
       );
       results.updated.push(studentRows[0].full_name);
     }
