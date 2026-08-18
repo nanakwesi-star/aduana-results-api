@@ -54,4 +54,28 @@ async function notifyHeadmasterOfUnlock({ examId, reason, unlockedBy }) {
   }
 }
 
-module.exports = { sendResultSms, sendResultWhatsapp, notifyHeadmasterOfUnlock, SENDER_ID };
+/**
+ * Sent to the student's guardian once the Headmaster validates a PTA
+ * dues payment (the final step of the collector -> Admin -> Headmaster
+ * chain). States who recorded it, how much, when, and — since a term's
+ * GHS 30 due can be paid in installments — either that this closes out
+ * the term or exactly what's still owed.
+ */
+async function sendPtaPaymentSms({ to, studentName, teacherName, amount, datePaid, term, isFinalPayment, balance }) {
+  const message = isFinalPayment
+    ? `Dear Parent, GHS ${amount} PTA dues for ${studentName} recorded by ${teacherName} on ${datePaid}. This completes payment for ${term}. - Aduana Model JHS`
+    : `Dear Parent, GHS ${amount} PTA dues for ${studentName} recorded by ${teacherName} on ${datePaid}. Balance remaining for ${term}: GHS ${balance}. - Aduana Model JHS`;
+
+  const { data } = await axios.post(`${BASE_URL}/sms/quick`, {
+    recipient: [to],
+    sender: SENDER_ID,
+    message,
+    is_schedule: false,
+  }, {
+    params: { key: MNOTIFY_API_KEY },
+  });
+
+  return { providerRef: data?.summary?.message_id || data?.message_id || null, raw: data };
+}
+
+module.exports = { sendResultSms, sendResultWhatsapp, notifyHeadmasterOfUnlock, sendPtaPaymentSms, SENDER_ID };
