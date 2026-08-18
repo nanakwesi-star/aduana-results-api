@@ -13,6 +13,7 @@ const { router: authRoutes } = require("./routes/auth");
 const { router: adminRoutes } = require("./routes/admin");
 const { router: parentRoutes } = require("./routes/parent");
 const { router: studentPortalRoutes } = require("./routes/student");
+const { router: ptaRoutes } = require("./routes/pta");
 const { startLockScheduler } = require("./services/lockScheduler");
 
 const app = express();
@@ -33,6 +34,7 @@ app.use("/api/super-admin", superAdminRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/parent", parentRoutes);
 app.use("/api/student", studentPortalRoutes);
+app.use("/api/pta", ptaRoutes);
 app.use("/verify", verifyRoutes); // public, no auth — QR code target
 
 // Central error handler — every route above throws { status, message } on failure.
