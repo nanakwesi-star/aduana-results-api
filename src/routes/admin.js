@@ -5,6 +5,21 @@ const { pool } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { writeAuditLog } = require("../services/auditLog");
 
+// Must stay identical to the SUBJECTS list in the frontend — this is the
+// server-side enforcement so the fixed subject list can't be bypassed by
+// calling the API directly (e.g. "English" vs "english" duplicates).
+const VALID_SUBJECTS = [
+  "English Language",
+  "Mathematics",
+  "Integrated Science",
+  "Computing",
+  "Ghanaian Language",
+  "Career Technology",
+  "Creative Arts and Design",
+  "Social Studies",
+  "RME",
+];
+
 // Everything here is Administrator-only. Super Administrator accounts are
 // deliberately NOT creatable through this route — that role stays a
 // manual, out-of-band decision (same reasoning as the original spec:
@@ -188,6 +203,9 @@ router.patch("/classes/:id/form-master", async (req, res, next) => {
 router.post("/classes/:id/subjects", async (req, res, next) => {
   const { subject, teacherId } = req.body;
   if (!subject || !teacherId) return res.status(400).json({ error: "subject and teacherId are required." });
+  if (!VALID_SUBJECTS.includes(subject)) {
+    return res.status(400).json({ error: `Subject must be one of the nine official subjects: ${VALID_SUBJECTS.join(", ")}.` });
+  }
   try {
     const { rows } = await pool.query(
       `INSERT INTO subject_assignments (class_id, subject, teacher_id) VALUES ($1,$2,$3)
