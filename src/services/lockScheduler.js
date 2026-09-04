@@ -38,8 +38,8 @@ async function runLockSweep() {
 }
 
 function startLockScheduler() {
-  cron.schedule("*/5 * * * *", runLockSweep);
-  console.log("Lock scheduler started (runs every 5 minutes).");
+  cron.schedule("0 * * * *", runLockSweep);
+  console.log("Lock scheduler started (runs every 1 hour).");
 }
 
 module.exports = { startLockScheduler, runLockSweep };
