@@ -5,7 +5,7 @@ const { writeAuditLog } = require("./auditLog");
 const SYSTEM_USER = { id: null, name: "SYSTEM", role: "super_administrator" };
 
 /**
- * Runs every 5 minutes and locks any published exam whose lock_at has
+ * Runs every hour and locks any published exam whose lock_at has
  * passed. This is the ONLY place in the codebase that sets status =
  * 'locked' — no user-facing route can do it directly, which is what
  * makes the lock actually automatic rather than something a role could
