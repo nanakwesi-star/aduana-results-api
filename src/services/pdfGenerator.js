@@ -126,6 +126,14 @@ async function generateTerminalReport({ student, className, term, academicYear, 
 
   const pageWidth = doc.page.width - 80; // usable width inside margins
 
+  // ---- Watermark: faint, centered crest behind everything else ----
+  if (fs.existsSync(CREST_PATH)) {
+    const wmSize = 360;
+    doc.opacity(0.07);
+    doc.image(CREST_PATH, (doc.page.width - wmSize) / 2, (doc.page.height - wmSize) / 2, { width: wmSize });
+    doc.opacity(1); // reset — otherwise every element drawn after this stays faded too
+  }
+
   // ---- Header: crest, school name, gold rule ----
   if (fs.existsSync(CREST_PATH)) doc.image(CREST_PATH, 40, 36, { width: 56 });
   doc.fillColor(VIOLET).font("Helvetica-Bold").fontSize(18).text("ADUANA MODEL JHS", 110, 40, { width: pageWidth - 70 });
