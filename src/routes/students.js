@@ -59,9 +59,12 @@ router.get("/", async (req, res, next) => {
 // target class, may do this. Every addition starts "pending" and stays
 // invisible for marks entry until the Headmaster validates it.
 router.post("/", async (req, res, next) => {
-  const { fullName, class: className, admissionNo, parentPhone, parentWhatsapp } = req.body;
+  const { fullName, class: className, admissionNo, parentPhone, parentWhatsapp, sex } = req.body;
   if (!fullName || !className || !admissionNo) {
     return res.status(400).json({ error: "fullName, class, and admissionNo are required." });
+  }
+  if (sex && !["M", "F"].includes(sex)) {
+    return res.status(400).json({ error: "sex must be 'M' or 'F'." });
   }
 
   const allowed = await canManageStudentsForClass(req.user, className);
@@ -71,9 +74,9 @@ router.post("/", async (req, res, next) => {
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO students (full_name, class, admission_no, parent_phone, parent_whatsapp, approval_status, added_by)
-       VALUES ($1,$2,$3,$4,$5,'pending',$6) RETURNING *`,
-      [fullName, className, admissionNo, parentPhone || null, parentWhatsapp || null, req.user.id]
+      `INSERT INTO students (full_name, class, admission_no, parent_phone, parent_whatsapp, sex, approval_status, added_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending',$7) RETURNING *`,
+      [fullName, className, admissionNo, parentPhone || null, parentWhatsapp || null, sex || null, req.user.id]
     );
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
@@ -92,7 +95,18 @@ const HEADER_MAP = {
   class: "class",
   parentphone: "parentPhone", phone: "parentPhone", parentsms: "parentPhone",
   parentwhatsapp: "parentWhatsapp", whatsapp: "parentWhatsapp",
+  sex: "sex", gender: "sex",
 };
+
+// Turns whatever a staff member typed in the Sex/Gender column ("M", "Male",
+// "f", "FEMALE", or blank) into a clean "M" / "F" / null, so a messy Excel
+// column doesn't turn into a database error for the whole row.
+function normalizeSex(value) {
+  const v = String(value || "").trim().toUpperCase();
+  if (v === "M" || v === "MALE") return "M";
+  if (v === "F" || v === "FEMALE") return "F";
+  return null;
+}
 
 // Bulk import from an uploaded Excel/CSV file. Same Admin / Form Master
 // permission rule as the single-add route, checked per class encountered
@@ -122,6 +136,7 @@ router.post("/bulk-upload", upload.single("file"), async (req, res, next) => {
       const fullName = row.fullName;
       const admissionNo = row.admissionNo;
       const className = row.class || defaultClass;
+      const sex = normalizeSex(row.sex);
 
       if (!fullName || !admissionNo || !className) {
         results.errors.push({ row: i + 2, reason: "Missing required field (name, admission no, or class)." });
@@ -138,9 +153,9 @@ router.post("/bulk-upload", upload.single("file"), async (req, res, next) => {
 
       try {
         await pool.query(
-          `INSERT INTO students (full_name, class, admission_no, parent_phone, parent_whatsapp, approval_status, added_by)
-           VALUES ($1,$2,$3,$4,$5,'pending',$6)`,
-          [fullName, className, admissionNo, row.parentPhone || null, row.parentWhatsapp || null, req.user.id]
+          `INSERT INTO students (full_name, class, admission_no, parent_phone, parent_whatsapp, sex, approval_status, added_by)
+           VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)`,
+          [fullName, className, admissionNo, row.parentPhone || null, row.parentWhatsapp || null, sex, req.user.id]
         );
         results.added.push(admissionNo);
       } catch (e) {
