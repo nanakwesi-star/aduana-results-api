@@ -78,4 +78,48 @@ async function sendPtaPaymentSms({ to, studentName, teacherName, amount, datePai
   return { providerRef: data?.summary?.message_id || data?.message_id || null, raw: data };
 }
 
-module.exports = { sendResultSms, sendResultWhatsapp, notifyHeadmasterOfUnlock, sendPtaPaymentSms, SENDER_ID };
+/**
+ * Sent when an Administrator adds a new staff member (teacher, admin, or
+ * headmaster) with just a name and phone number. The link lets the staff
+ * member set their own password rather than the Administrator having to
+ * hand one over directly.
+ */
+async function sendStaffInviteSms({ to, firstName, role, inviteLink }) {
+  const message =
+    `Hi ${firstName}, you've been added as ${role === "administrator" ? "an" : "a"} ${role} on the Aduana Model JHS portal. ` +
+    `Set up your login here: ${inviteLink} (expires in 48 hours). - Aduana Model JHS`;
+
+  const { data } = await axios.post(`${BASE_URL}/sms/quick`, {
+    recipient: [to],
+    sender: SENDER_ID,
+    message,
+    is_schedule: false,
+  }, {
+    params: { key: MNOTIFY_API_KEY },
+  });
+
+  return { providerRef: data?.summary?.message_id || data?.message_id || null, raw: data };
+}
+
+/**
+ * Confirms to the staff member's own phone that their registration went
+ * through, so they know the account is live even if they close the tab
+ * right after setting their password.
+ */
+async function sendStaffRegisteredSms({ to, firstName }) {
+  const message =
+    `Hi ${firstName}, your Aduana Model JHS portal account is now active. You can log in with your phone number and password. - Aduana Model JHS`;
+
+  const { data } = await axios.post(`${BASE_URL}/sms/quick`, {
+    recipient: [to],
+    sender: SENDER_ID,
+    message,
+    is_schedule: false,
+  }, {
+    params: { key: MNOTIFY_API_KEY },
+  });
+
+  return { providerRef: data?.summary?.message_id || data?.message_id || null, raw: data };
+}
+
+module.exports = { sendResultSms, sendResultWhatsapp, notifyHeadmasterOfUnlock, sendPtaPaymentSms, sendStaffInviteSms, sendStaffRegisteredSms, SENDER_ID };
