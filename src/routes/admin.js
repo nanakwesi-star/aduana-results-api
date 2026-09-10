@@ -1,9 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const { pool } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { writeAuditLog } = require("../services/auditLog");
+const { sendStaffInviteSms } = require("../services/mnotify");
 
 // Must stay identical to the SUBJECTS list in the frontend — this is the
 // server-side enforcement so the fixed subject list can't be bypassed by
@@ -29,44 +31,107 @@ router.use(requireAuth, requireRole("administrator"));
 // ---------------------------------------------------------------
 // Staff accounts
 // ---------------------------------------------------------------
+// Ghana numbers get typed a dozen different ways (+233551234567,
+// 0551234567, 551234567, with spaces/dashes). Normalizing to a single
+// local 0XXXXXXXX form keeps phone lookups (login, duplicate checks)
+// reliable and gives mNotify a consistent number to text.
+function toLocalGhanaPhone(raw) {
+  const digits = String(raw || "").replace(/\D/g, "");
+  const last9 = digits.slice(-9);
+  return last9.length === 9 ? `0${last9}` : digits;
+}
+
 router.get("/users", async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, email, role, active, created_at FROM users
+      `SELECT id, name, email, phone, role, active, created_at,
+              (password_hash IS NULL) AS pending, invite_expires_at
+       FROM users
        WHERE role IN ('teacher','administrator','headmaster') ORDER BY role, name`
     );
     res.json(rows);
   } catch (err) { next(err); }
 });
 
+// Creates a pending staff account from just a name and phone number, then
+// texts a one-time registration link so the staff member sets their own
+// password. No email and no password are collected here — the account
+// stays inactive (password_hash NULL) until they complete registration
+// through the public /api/public/staff-invite/:token endpoint.
 router.post("/users", async (req, res, next) => {
-  const { name, email, password, role } = req.body;
-  if (!name || !email || !password || !role) {
-    return res.status(400).json({ error: "name, email, password, and role are all required." });
+  const { surname, firstName, phone, role } = req.body;
+  if (!surname || !firstName || !phone || !role) {
+    return res.status(400).json({ error: "Surname, first name, phone number, and role are all required." });
   }
   if (!["teacher", "administrator", "headmaster"].includes(role)) {
     return res.status(400).json({ error: "Role must be teacher, administrator, or headmaster." });
   }
-  if (password.length < 8) {
-    return res.status(400).json({ error: "Password must be at least 8 characters." });
+  const localPhone = toLocalGhanaPhone(phone);
+  if (localPhone.length !== 10) {
+    return res.status(400).json({ error: "Enter a valid 10-digit Ghana phone number." });
   }
+  const name = `${surname.trim()} ${firstName.trim()}`;
+  const inviteToken = crypto.randomBytes(32).toString("hex");
+  const inviteExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
   try {
-    const passwordHash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
-      `INSERT INTO users (name, email, password_hash, role) VALUES ($1,$2,$3,$4)
-       RETURNING id, name, email, role, active, created_at`,
-      [name, email.toLowerCase().trim(), passwordHash, role]
+      `INSERT INTO users (name, phone, role, active, invite_token, invite_expires_at)
+       VALUES ($1,$2,$3,FALSE,$4,$5)
+       RETURNING id, name, phone, role, active, created_at`,
+      [name, localPhone, role, inviteToken, inviteExpiresAt]
     );
     const created = rows[0];
+
+    const inviteLink = `${process.env.PORTAL_BASE_URL}/?invite=${inviteToken}`;
+    try {
+      await sendStaffInviteSms({ to: localPhone, firstName: firstName.trim(), role, inviteLink });
+    } catch (smsErr) {
+      // Account is created either way — an Administrator can still use
+      // "Resend Link" from the Staff Directory if the SMS itself failed.
+      created.smsFailed = true;
+    }
+
     await writeAuditLog(pool, {
-      examId: null, user: req.user, action: `Created ${role} staff account for ${name} (${email}).`,
+      examId: null, user: req.user, action: `Invited ${role} ${name} (${localPhone}) to register.`,
       previousValue: null, newValue: created.id, ip: req.ip, device: req.headers["user-agent"],
-    }).catch(() => {}); // best-effort; account creation itself already succeeded above
+    }).catch(() => {});
     res.status(201).json(created);
   } catch (err) {
-    if (err.code === "23505") return res.status(409).json({ error: "That email is already registered." });
+    if (err.code === "23505") return res.status(409).json({ error: "That phone number is already registered." });
     next(err);
   }
+});
+
+// Regenerates the invite token/expiry and re-sends the SMS — for when
+// the first text never arrived, or the 48-hour window lapsed before the
+// staff member got to it.
+router.post("/users/:id/resend-invite", async (req, res, next) => {
+  try {
+    const { rows: existing } = await pool.query(
+      `SELECT name, phone, role, password_hash FROM users WHERE id = $1`, [req.params.id]
+    );
+    if (!existing[0]) return res.status(404).json({ error: "Staff account not found." });
+    if (existing[0].password_hash) return res.status(400).json({ error: "This account has already completed registration." });
+    if (!existing[0].phone) return res.status(400).json({ error: "This account has no phone number on file." });
+
+    const inviteToken = crypto.randomBytes(32).toString("hex");
+    const inviteExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    await pool.query(
+      `UPDATE users SET invite_token = $1, invite_expires_at = $2 WHERE id = $3`,
+      [inviteToken, inviteExpiresAt, req.params.id]
+    );
+
+    const firstName = existing[0].name.split(" ").slice(1).join(" ") || existing[0].name;
+    const inviteLink = `${process.env.PORTAL_BASE_URL}/?invite=${inviteToken}`;
+    await sendStaffInviteSms({ to: existing[0].phone, firstName, role: existing[0].role, inviteLink });
+
+    await writeAuditLog(pool, {
+      examId: null, user: req.user, action: `Resent registration link to ${existing[0].name} (${existing[0].phone}).`,
+      previousValue: null, newValue: req.params.id, ip: req.ip, device: req.headers["user-agent"],
+    }).catch(() => {});
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 router.patch("/users/:id/deactivate", async (req, res, next) => {
