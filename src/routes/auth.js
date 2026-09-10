@@ -26,19 +26,36 @@ const loginLimiter = rateLimit({
  * matched, so this can't be used to enumerate real emails.
  */
 router.post("/login", loginLimiter, async (req, res, next) => {
-  const GENERIC_ERROR = "Incorrect email or password.";
+  const GENERIC_ERROR = "Incorrect phone/email or password.";
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
-  const normalizedEmail = email.toLowerCase().trim();
+  if (!email || !password) return res.status(400).json({ error: "Phone number (or email) and password are required." });
+  const identifier = email.toLowerCase().trim();
+  // Staff now register with just a phone number instead of an email, so
+  // the same login field has to accept either. Anything without an "@"
+  // is treated as a phone number and normalized to the local 0XXXXXXXX
+  // form used everywhere else (see toLocalGhanaPhone in admin.js) —
+  // legacy email-based accounts (existing admins/headmaster) keep working
+  // exactly as before.
+  const isPhone = !identifier.includes("@");
+  const normalizedPhone = (() => {
+    const digits = identifier.replace(/\D/g, "");
+    const last9 = digits.slice(-9);
+    return last9.length === 9 ? `0${last9}` : digits;
+  })();
 
   try {
-    const { rows: staffRows } = await pool.query(`SELECT * FROM users WHERE email = $1 AND active = TRUE`, [normalizedEmail]);
+    const { rows: staffRows } = await pool.query(
+      isPhone
+        ? `SELECT * FROM users WHERE phone = $1 AND active = TRUE`
+        : `SELECT * FROM users WHERE email = $1 AND active = TRUE`,
+      [isPhone ? normalizedPhone : identifier]
+    );
     const staffUser = staffRows[0];
     if (staffUser) {
       const valid = await bcrypt.compare(password, staffUser.password_hash);
       if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
       const token = jwt.sign({ id: staffUser.id, name: staffUser.name, role: staffUser.role }, process.env.JWT_SECRET, { expiresIn: "12h" });
-      return res.json({ token, user: { id: staffUser.id, name: staffUser.name, role: staffUser.role, email: staffUser.email } });
+      return res.json({ token, user: { id: staffUser.id, name: staffUser.name, role: staffUser.role, email: staffUser.email, phone: staffUser.phone } });
     }
 
     const { rows: studentRows } = await pool.query(
