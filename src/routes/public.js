@@ -70,4 +70,65 @@ router.get("/students/:admissionNo/results", lookupLimiter, async (req, res, nex
   } catch (err) { next(err); }
 });
 
+// ---------------------------------------------------------------
+// Staff registration by SMS invite
+// ---------------------------------------------------------------
+const bcrypt = require("bcryptjs");
+const { sendStaffRegisteredSms } = require("../services/mnotify");
+
+const inviteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many attempts. Please wait 15 minutes and try again." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Lets the registration page greet the staff member by name and confirm
+// the link is still valid, without exposing anything else about the
+// account. A missing/expired/already-used token all return the same
+// generic error so a guessed token can't be distinguished from a real
+// but expired one.
+router.get("/staff-invite/:token", inviteLimiter, async (req, res, next) => {
+  const GENERIC_ERROR = "This registration link is invalid or has expired.";
+  try {
+    const { rows } = await pool.query(
+      `SELECT name, role FROM users
+       WHERE invite_token = $1 AND invite_expires_at > now() AND password_hash IS NULL`,
+      [req.params.token]
+    );
+    if (!rows[0]) return res.status(404).json({ error: GENERIC_ERROR });
+    res.json({ name: rows[0].name, role: rows[0].role });
+  } catch (err) { next(err); }
+});
+
+// Completes registration: the staff member sets a password, the account
+// activates, and the invite token is cleared so the link can't be reused.
+router.post("/staff-invite/:token", inviteLimiter, async (req, res, next) => {
+  const GENERIC_ERROR = "This registration link is invalid or has expired.";
+  const { password } = req.body;
+  if (!password || password.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters." });
+  }
+  try {
+    const { rows: existing } = await pool.query(
+      `SELECT id, name, phone FROM users
+       WHERE invite_token = $1 AND invite_expires_at > now() AND password_hash IS NULL`,
+      [req.params.token]
+    );
+    if (!existing[0]) return res.status(404).json({ error: GENERIC_ERROR });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `UPDATE users SET password_hash = $1, active = TRUE, invite_token = NULL, invite_expires_at = NULL WHERE id = $2`,
+      [passwordHash, existing[0].id]
+    );
+
+    const firstName = existing[0].name.split(" ").slice(1).join(" ") || existing[0].name;
+    await sendStaffRegisteredSms({ to: existing[0].phone, firstName }).catch(() => {});
+
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = { router };
