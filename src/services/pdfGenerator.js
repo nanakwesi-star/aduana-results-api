@@ -8,6 +8,15 @@ const OUTPUT_DIR = process.env.REPORTS_DIR || "/var/data/reports";
 const PORTAL_BASE = process.env.PORTAL_BASE_URL || "https://portal.aduanamodel.edu.gh";
 const CREST_PATH = path.join(__dirname, "../assets/crest.png");
 
+// The database stores academic_year as a plain number (2026) — this turns
+// it into the "2026/27" label for anything printed, without changing what's
+// stored, queried, or used in filenames/QR tokens.
+function academicYearLabel(year) {
+  const y = Number(year);
+  if (!y) return "";
+  return `${y}/${String((y + 1) % 100).padStart(2, "0")}`;
+}
+
 // Must stay identical to SUBJECTS in the frontend and VALID_SUBJECTS in
 // admin.js — this fixed order is what the terminal report prints rows in,
 // subject present or not.
@@ -74,7 +83,7 @@ async function generateReportCard({ exam, student, version, marksRow, dbClient }
 
   doc.fontSize(16).text("Aduana Model JHS — Examination Report", { align: "center" });
   doc.moveDown(0.5);
-  doc.fontSize(11).text(`${exam.class}  ·  ${exam.subject}  ·  ${exam.term} ${exam.academic_year}`, { align: "center" });
+  doc.fontSize(11).text(`${exam.class}  ·  ${exam.subject}  ·  ${exam.term} ${academicYearLabel(exam.academic_year)}`, { align: "center" });
   doc.moveDown();
   doc.fontSize(12).text(`Student: ${student.full_name}`);
   doc.text(`Score: ${marksRow.score}   Grade: ${marksRow.grade || "-"}`);
@@ -150,7 +159,7 @@ async function generateTerminalReport({ student, className, term, academicYear, 
   ];
   const infoRight = [
     ["Class", className],
-    ["Term / Year", `${term}  ${academicYear}`],
+    ["Term / Year", `${term}  ${academicYearLabel(academicYear)}`],
   ];
   doc.font("Helvetica").fontSize(10).fillColor("#1c1917");
   infoLeft.forEach(([label, value], i) => {
@@ -265,7 +274,7 @@ async function generateBroadsheet({ exam, version, marksRows, dbClient }) {
   const stream = fs.createWriteStream(filePath);
   doc.pipe(stream);
 
-  doc.fontSize(16).text(`Broadsheet — ${exam.class} · ${exam.subject} · ${exam.term} ${exam.academic_year} (v${version})`);
+  doc.fontSize(16).text(`Broadsheet — ${exam.class} · ${exam.subject} · ${exam.term} ${academicYearLabel(exam.academic_year)} (v${version})`);
   doc.moveDown();
   marksRows
     .sort((a, b) => b.score - a.score)
