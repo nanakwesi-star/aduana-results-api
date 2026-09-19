@@ -15,10 +15,10 @@ const { router: parentRoutes } = require("./routes/parent");
 const { router: studentPortalRoutes } = require("./routes/student");
 const { router: ptaRoutes } = require("./routes/pta");
 const { router: reportsRoutes } = require("./routes/reports");
-const { router: timetableRoutes } = require("./routes/timetables");
+const { router: timetableRoutes } = require("./routes/timetables"); const { router: overviewRoutes } = require("./routes/overview");
 const { startLockScheduler } = require("./services/lockScheduler");
 
-const app = express();
+const app = express(); app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors()); // TODO: restrict to your real frontend's domain once it has one
 app.use(express.json());
@@ -38,7 +38,7 @@ app.use("/api/parent", parentRoutes);
 app.use("/api/student", studentPortalRoutes);
 app.use("/api/pta", ptaRoutes);
 app.use("/api/reports", reportsRoutes);
-app.use("/api/timetables", timetableRoutes);
+app.use("/api/timetables", timetableRoutes); app.use("/api/overview", overviewRoutes);
 app.use("/verify", verifyRoutes); // public, no auth — QR code target
 
 // Central error handler — every route above throws { status, message } on failure.
