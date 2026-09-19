@@ -64,7 +64,7 @@ router.post("/users", async (req, res, next) => {
     return res.status(400).json({ error: "Surname, first name, phone number, and role are all required." });
   }
   if (!["teacher", "administrator", "headmaster"].includes(role)) {
-    return res.status(400).json({ error: "Role must be teacher, administrator, or headmaster." });
+    return res.status(400).json({ error: "Role must be teacher, administrator, or head." });
   }
   const localPhone = toLocalGhanaPhone(phone);
   if (localPhone.length !== 10) {
