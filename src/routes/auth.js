@@ -18,4 +18,91 @@ const loginLimiter = rateLimit({
 
 /**
  * Real login, unified across every role. Staff and parents live in the
- * `users` table; students have their
+ * `users` table; students have their credentials directly on their own
+ * `students` row instead of a separate account table, since a student's
+ * "account" and their academic record are naturally the same thing.
+ * Either way, the password is only ever compared as a bcrypt hash, and
+ * a failed attempt never reveals which table (or whether an account)
+ * matched, so this can't be used to enumerate real emails.
+ */
+router.post("/login", loginLimiter, async (req, res, next) => {
+  const GENERIC_ERROR = "Incorrect phone/email or password.";
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Phone number and password are required." });
+  const identifier = String(email).toLowerCase().trim();
+
+  // Anything without an "@" is treated as a phone number and normalized
+  // to the local 0XXXXXXXXX form used everywhere else (see toLocalGhanaPhone
+  // in admin.js). Email logins still work for legacy accounts.
+  const isPhone = !identifier.includes("@");
+  const normalizedPhone = (() => {
+    const digits = identifier.replace(/\D/g, "");
+    const last9 = digits.slice(-9);
+    return last9.length === 9 ? `0${last9}` : digits;
+  })();
+
+  try {
+    const { rows: staffRows } = await pool.query(
+      isPhone
+        ? `SELECT * FROM users WHERE phone = $1 AND active = TRUE`
+        : `SELECT * FROM users WHERE email = $1 AND active = TRUE`,
+      [isPhone ? normalizedPhone : identifier]
+    );
+    const staffUser = staffRows[0];
+    if (staffUser) {
+      const valid = await bcrypt.compare(password, staffUser.password_hash);
+      if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
+      const token = jwt.sign({ id: staffUser.id, name: staffUser.name, role: staffUser.role }, process.env.JWT_SECRET, { expiresIn: "12h" });
+      return res.json({ token, user: { id: staffUser.id, name: staffUser.name, role: staffUser.role, email: staffUser.email, phone: staffUser.phone } });
+    }
+
+    // Students sign in with their email, so only check them when an email was typed.
+    if (!isPhone) {
+      const { rows: studentRows } = await pool.query(
+        `SELECT * FROM students WHERE email = $1 AND active = TRUE AND password_hash IS NOT NULL`,
+        [identifier]
+      );
+      const student = studentRows[0];
+      if (student) {
+        const valid = await bcrypt.compare(password, student.password_hash);
+        if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
+        const token = jwt.sign({ id: student.id, name: student.full_name, role: "student" }, process.env.JWT_SECRET, { expiresIn: "12h" });
+        return res.json({ token, user: { id: student.id, name: student.full_name, role: "student", email: student.email } });
+      }
+    }
+
+    return res.status(401).json({ error: GENERIC_ERROR });
+  } catch (err) { next(err); }
+});
+
+const { requireAuth } = require("../middleware/auth");
+
+/**
+ * Self-service password change for any signed-in account — staff,
+ * parent, or student. Requires the current password before allowing a
+ * change, same as any normal "change password" flow, and always
+ * re-verifies it server-side rather than trusting that the person is
+ * who the token says (a stolen-but-still-valid token alone isn't
+ * enough to take over the account this way).
+ */
+router.post("/change-password", requireAuth, async (req, res, next) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: "Current and new password are required." });
+  if (newPassword.length < 8) return res.status(400).json({ error: "New password must be at least 8 characters." });
+
+  try {
+    const isStudent = req.user.role === "student";
+    const table = isStudent ? "students" : "users";
+    const { rows } = await pool.query(`SELECT password_hash FROM ${table} WHERE id = $1`, [req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Account not found." });
+
+    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: "Current password is incorrect." });
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(`UPDATE ${table} SET password_hash = $1 WHERE id = $2`, [newHash, req.user.id]);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+module.exports = { router };
