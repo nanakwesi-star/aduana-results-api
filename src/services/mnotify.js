@@ -86,7 +86,7 @@ async function sendPtaPaymentSms({ to, studentName, teacherName, amount, datePai
  */
 async function sendStaffInviteSms({ to, firstName, role, inviteLink }) {
   const message =
-    `Hi ${firstName}, you've been added as ${role === "administrator" ? "an" : "a"} ${role} on the Aduana Model JHS portal. ` +
+    `Hi ${firstName}, you've been added as ${role === "administrator" ? "an" : "a"} ${role === "headmaster" ? "head" : role} on the Aduana Model JHS portal. ` +
     `Set up your login here: ${inviteLink} (expires in 48 hours). - Aduana Model JHS`;
 
   const { data } = await axios.post(`${BASE_URL}/sms/quick`, {
