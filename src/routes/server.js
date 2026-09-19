@@ -18,7 +18,7 @@ const { router: reportsRoutes } = require("./routes/reports");
 const { router: timetableRoutes } = require("./routes/timetables"); const { router: overviewRoutes } = require("./routes/overview");
 const { startLockScheduler } = require("./services/lockScheduler");
 
-const app = express();
+const app = express(); app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors()); // TODO: restrict to your real frontend's domain once it has one
 app.use(express.json());
