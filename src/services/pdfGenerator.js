@@ -155,7 +155,7 @@ async function generateTerminalReport({ student, className, term, academicYear, 
   let y = 118;
   const infoLeft = [
     ["Student Name", student.full_name],
-    ["Admission No.", student.admission_no],
+    ["Student Number", student.admission_no],
   ];
   const infoRight = [
     ["Class", className],
