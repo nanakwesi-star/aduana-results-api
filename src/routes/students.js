@@ -61,7 +61,7 @@ router.get("/", async (req, res, next) => {
 router.post("/", async (req, res, next) => {
   const { fullName, class: className, admissionNo, parentPhone, parentWhatsapp, sex } = req.body;
   if (!fullName || !className || !admissionNo) {
-    return res.status(400).json({ error: "fullName, class, and admissionNo are required." });
+    return res.status(400).json({ error: "Full name, class, and student number are required." });
   }
   if (sex && !["M", "F"].includes(sex)) {
     return res.status(400).json({ error: "sex must be 'M' or 'F'." });
@@ -91,7 +91,7 @@ function normalizeHeader(h) {
 
 const HEADER_MAP = {
   fullname: "fullName", name: "fullName", studentname: "fullName",
-  admissionno: "admissionNo", admissionnumber: "admissionNo",
+  admissionno: "admissionNo", admissionnumber: "admissionNo", studentnumber: "admissionNo", studentno: "admissionNo",
   class: "class",
   parentphone: "parentPhone", phone: "parentPhone", parentsms: "parentPhone",
   parentwhatsapp: "parentWhatsapp", whatsapp: "parentWhatsapp",
@@ -139,7 +139,7 @@ router.post("/bulk-upload", upload.single("file"), async (req, res, next) => {
       const sex = normalizeSex(row.sex);
 
       if (!fullName || !admissionNo || !className) {
-        results.errors.push({ row: i + 2, reason: "Missing required field (name, admission no, or class)." });
+        results.errors.push({ row: i + 2, reason: "Missing required field (name, student number, or class)." });
         continue;
       }
 
@@ -160,7 +160,7 @@ router.post("/bulk-upload", upload.single("file"), async (req, res, next) => {
         results.added.push(admissionNo);
       } catch (e) {
         if (e.code === "23505") { // unique_violation on admission_no
-          results.skipped.push({ row: i + 2, admissionNo, reason: "Admission number already exists." });
+          results.skipped.push({ row: i + 2, admissionNo, reason: "Student number already exists." });
         } else {
           results.errors.push({ row: i + 2, reason: e.message });
         }
