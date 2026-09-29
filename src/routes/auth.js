@@ -24,6 +24,10 @@ const loginLimiter = rateLimit({
  * Either way, the password is only ever compared as a bcrypt hash, and
  * a failed attempt never reveals which table (or whether an account)
  * matched, so this can't be used to enumerate real emails.
+ *
+ * NEW: a parent can also sign in with the parent phone number saved on
+ * their child's record (username) and the child's student number
+ * (password). This is checked last, after staff/student accounts.
  */
 router.post("/login", loginLimiter, async (req, res, next) => {
   const GENERIC_ERROR = "Incorrect phone/email or password.";
@@ -49,9 +53,9 @@ router.post("/login", loginLimiter, async (req, res, next) => {
       [isPhone ? normalizedPhone : identifier]
     );
     const staffUser = staffRows[0];
-    if (staffUser) {
-      const valid = await bcrypt.compare(password, staffUser.password_hash);
-      if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
+    // A wrong password here does NOT stop the login: the same phone number
+    // may belong to a parent signing in with a student number (below).
+    if (staffUser && await bcrypt.compare(password, staffUser.password_hash)) {
       const token = jwt.sign({ id: staffUser.id, name: staffUser.name, role: staffUser.role }, process.env.JWT_SECRET, { expiresIn: "12h" });
       return res.json({ token, user: { id: staffUser.id, name: staffUser.name, role: staffUser.role, email: staffUser.email, phone: staffUser.phone } });
     }
@@ -68,6 +72,29 @@ router.post("/login", loginLimiter, async (req, res, next) => {
         if (!valid) return res.status(401).json({ error: GENERIC_ERROR });
         const token = jwt.sign({ id: student.id, name: student.full_name, role: "student" }, process.env.JWT_SECRET, { expiresIn: "12h" });
         return res.json({ token, user: { id: student.id, name: student.full_name, role: "student", email: student.email } });
+      }
+    }
+
+    // Parent login: username = parent phone saved on the student,
+    // password = the student's number (e.g. AMJ-26-001).
+    // Only approved students can be reached this way.
+    if (isPhone) {
+      const { rows: kids } = await pool.query(
+        `SELECT id, full_name, class, admission_no FROM students
+         WHERE parent_phone = $1 AND UPPER(admission_no) = $2
+           AND approval_status = 'approved' AND active IS NOT FALSE
+         LIMIT 1`,
+        [normalizedPhone, String(password).trim().toUpperCase()]
+      );
+      if (kids[0]) {
+        const kid = kids[0];
+        const parentName = `Parent of ${kid.full_name}`;
+        const token = jwt.sign(
+          { id: kid.id, name: parentName, role: "parent", phone: normalizedPhone, guest: true },
+          process.env.JWT_SECRET,
+          { expiresIn: "4h" }
+        );
+        return res.json({ token, user: { id: kid.id, name: parentName, role: "parent", phone: normalizedPhone } });
       }
     }
 
